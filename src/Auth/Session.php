@@ -20,8 +20,14 @@ class Session
     private $expires = null;
     /** @var string|null */
     private $accessToken = null;
+    /** @var string|null */
+    private $refreshToken = null;
+    /** @var DateTime|null */
+    private $refreshTokenExpiresIn = null;
     /** @var AccessTokenOnlineUserInfo|null */
     private $onlineAccessInfo = null;
+
+    private $migratingToRefreshToken = false;
 
     public function __construct(
         private string $id,
@@ -76,7 +82,33 @@ class Session
      */
     public function getAccessToken()
     {
-        return $this->accessToken;
+        if ( ( $this->getExpires() && $this->getExpires()->getTimestamp() > time() ) || $this->isMigratingToRefreshToken() ) {
+            return $this->accessToken;
+        } else {
+            $response = OAuth::renewAccessToken($this);
+            return $response->getAccessToken();
+        }
+    }
+
+    public function isMigratingToRefreshToken(): bool
+    {
+        return $this->migratingToRefreshToken;
+    }
+
+    /**
+     * @return string|null
+     */
+    public function getRefreshToken()
+    {
+        return $this->refreshToken;
+    }
+
+    /**
+     * @return int|null
+     */
+    public function getRefreshTokenExpiresIn()
+    {
+        return $this->refreshTokenExpiresIn;
     }
 
     /**
@@ -112,9 +144,32 @@ class Session
         $this->expires = $date;
     }
 
+    /**
+     * @param string|int|DateTime $refreshTokenExpiresIn
+     */
+    public function setRefreshTokenExpiresIn($refreshTokenExpiresIn): void
+    {
+        $date = null;
+        if ($refreshTokenExpiresIn) {
+            if (is_string($refreshTokenExpiresIn)) {
+                $date = new DateTime($refreshTokenExpiresIn);
+            } elseif (is_numeric($refreshTokenExpiresIn)) {
+                $date = new DateTime("@$refreshTokenExpiresIn");
+            } else {
+                $date = $refreshTokenExpiresIn;
+            }
+        }
+        $this->refreshTokenExpiresIn = $date;
+    }
+
     public function setAccessToken(string $accessToken): void
     {
         $this->accessToken = $accessToken;
+    }
+
+    public function setRefreshToken(string $refreshToken): void
+    {
+        $this->refreshToken = $refreshToken;
     }
 
     public function setOnlineAccessInfo(AccessTokenOnlineUserInfo $onlineAccessInfo): void
@@ -147,9 +202,19 @@ class Session
      */
     public function isValid(): bool
     {
+        // force migration to get refresh token if access token expiration is null
+        if ($this->getExpires() === null ) {
+            $this->getAccessToken();
+        }
+
         return (Context::$SCOPES->equals($this->scope) &&
             $this->accessToken &&
             (!$this->expires || ($this->expires > new DateTime()))
         );
+    }
+
+    public function setMigratingToRefreshToken(bool $migratingToRefreshToken): void
+    {
+        $this->migratingToRefreshToken = $migratingToRefreshToken;
     }
 }

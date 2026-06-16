@@ -130,6 +130,9 @@ class OAuth
         $session = new Session($sessionId, $sanitizedShop, $isOnline, '');
 
         $session->setAccessToken($response->getAccessToken());
+        $session->setExpires(time() + $response->getExpiresIn());
+        $session->setRefreshToken($response->getRefreshToken());
+        $session->setRefreshTokenExpiresIn(time() + $response->getRefreshTokenExpiresIn());
         $session->setScope($response->getScope());
 
         if ($session->isOnline()) {
@@ -410,6 +413,7 @@ class OAuth
         $post = [
             'client_id' => Context::$API_KEY,
             'client_secret' => Context::$API_SECRET_KEY,
+            'expiring' => 1,
             'code' => $query['code'],
         ];
 
@@ -461,7 +465,7 @@ class OAuth
      */
     private static function buildAccessTokenResponse(array $body): AccessTokenResponse
     {
-        return new AccessTokenResponse($body['access_token'], $body['scope']);
+        return new AccessTokenResponse($body['access_token'], $body['scope'], $body['expires_in'], $body['refresh_token'], $body['refresh_token_expires_in']);
     }
 
     /**
@@ -478,5 +482,55 @@ class OAuth
     public static function requestAccessToken(Http $client, array $post): HttpResponse
     {
         return $client->post(self::ACCESS_TOKEN_POST_PATH, $post);
+    }
+
+    /**
+     * Renews the access token for the given session.
+     *
+     * @param Session $session The session to renew
+     *
+     * @return AccessTokenResponse The new access token
+     * @throws HttpRequestException
+     */
+    public static function renewAccessToken(Session $session): AccessTokenResponse
+    {   
+        $body = [
+            'client_id' => Context::$API_KEY,
+            'client_secret' => Context::$API_SECRET_KEY,
+            'grant_type' => $session->getExpires() === null ? 'urn:ietf:params:oauth:grant-type:token-exchange' : 'refresh_token',
+        ];
+
+        if ( $session->getExpires() !== null) {
+            $body['refresh_token'] = $session->getRefreshToken();
+        } else {
+            $session->setMigratingToRefreshToken(true);
+            $body['subject_token'] = $session->getAccessToken();
+            $body['subject_token_type'] = 'urn:shopify:params:oauth:token-type:offline-access-token';
+            $body['requested_token_type'] = 'urn:shopify:params:oauth:token-type:offline-access-token';
+            $body['expiring'] = 1;
+        }
+
+        $client = new Http($session->getShop());
+        $renewTokenResponse = self::requestAccessToken($client, $body);
+
+        if ($renewTokenResponse->getStatusCode() !== 200) {
+            throw new HttpRequestException("Failed to get access token: {$renewTokenResponse->getDecodedBody()}");
+        }
+
+        $body = $renewTokenResponse->getDecodedBody();
+        $response = new AccessTokenResponse($body['access_token'], $body['scope'], $body['expires_in'], $body['refresh_token'], $body['refresh_token_expires_in']);
+
+        $session->setAccessToken($response->getAccessToken());
+        $session->setExpires(time() + $response->getExpiresIn());
+        $session->setRefreshToken($response->getRefreshToken());
+        $session->setRefreshTokenExpiresIn(time() + $response->getRefreshTokenExpiresIn());
+        $sessionStored = Context::$SESSION_STORAGE->storeSession($session);
+        if (!$sessionStored) {
+            throw new SessionStorageException(
+                'OAuth Session could not be saved. Please check your session storage and renew access token functionality.',
+            );
+        }
+
+        return $response;
     }
 }
